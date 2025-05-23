@@ -1,0 +1,121 @@
+
+.automation-input-container {
+  background-color: rgba(57, 104, 74, 0.85); // darker hydroponic background
+  color: #f1fdf2; // light greenish text
+  padding: 2rem;
+  border-radius: 12px;
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2rem;
+
+  h2 {
+    margin: 0;
+    font-size: 1.5rem;
+  }
+
+  .toggle-container {
+    display: flex;
+    align-items: center;
+
+    .toggle-label {
+      margin-left: 0.5rem;
+      font-weight: bold;
+    }
+  }
+}
+
+.input-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1rem;
+
+  .input-group {
+    display: flex;
+    flex-direction: column;
+
+    label {
+      margin-bottom: 0.5rem;
+      font-weight: bold;
+      text-transform: capitalize;
+      color: #b3d9c2; // soft green
+    }
+
+    input {
+      padding: 0.5rem;
+      border: none;
+      border-radius: 8px;
+      margin-bottom: 0.5rem;
+      font-size: 1rem;
+      background-color: #2e443f; // medium green background
+      color: #f1fdf2; // text color
+    }
+  }
+}
+
+.submit-btn {
+  margin-top: 2rem;
+  padding: 0.75rem 1.5rem;
+  background-color: #4caf50; // button green
+  border: none;
+  color: #f1fdf2;
+  font-size: 1rem;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 0.3s;
+
+  &:hover {
+    background-color: #3a9440; // darker hover
+  }
+}
+
+/* Toggle Switch */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 50px;
+  height: 28px;
+
+  input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+
+  .slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: #ccc;
+    transition: 0.4s;
+    border-radius: 34px;
+
+    &::before {
+      position: absolute;
+      content: "";
+      height: 22px;
+      width: 22px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: 0.4s;
+      border-radius: 50%;
+    }
+  }
+
+  input:checked + .slider {
+    background-color: #4caf50; // toggle green
+  }
+
+  input:checked + .slider:before {
+    transform: translateX(22px);
+  }
+}
