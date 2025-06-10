@@ -1,0 +1,97 @@
+@import "../../styles/responsive.scss";
+
+.chartBox {
+  display: flex;
+  height: 100%;
+
+  @include sm {
+    flex-direction: column;
+  }
+
+  .boxInfo {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+
+    @include sm {
+      gap: 20px;
+    }
+
+    .title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+
+      @include xxl {
+        font-size: 14px;
+      }
+
+      img {
+      height: 30px; 
+      width: auto; 
+    }
+    }
+
+    h1 {
+      font-size: 36px;
+      font-weight: bold;
+
+      @include xxl {
+        font-size: 28px;
+      }
+
+      .unit {
+        font-size: 16px;
+        margin-left: 4px;
+      }
+    }
+
+    p {
+      font-size: 20px; 
+      font-weight: 500;
+      color: #ccc;
+
+      @include xxl {
+        font-size: 18px;
+      }
+    }
+  }
+
+  .chartInfo {
+    flex: 2;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+
+    .chart {
+      width: 100%;
+      height: 99%;
+    }
+
+    .texts {
+      display: flex;
+      flex-direction: column;
+      text-align: right;
+
+      .mean {
+        font-size: 28px;
+        font-weight: bold;
+
+        @include xxl {
+          font-size: 22px;
+        }
+      }
+
+      .duration {
+        font-size: 20px; 
+        font-weight: 500;
+        color: #ccc;
+
+        @include xxl {
+          font-size: 18px;
+        }
+      }
+    }
+  }
+}
