@@ -20,7 +20,7 @@ import Register from "./pages/register/Register";
 import Log from "./pages/log/Log";
 import Actuator_Logs from "./pages/actuator_logs/Actuator_Logs";
 import Actuator_Log from "./pages/actuator_log/Actuator_Log";
-import Garden_Logs from "./pages/logs/Logs";
+import Garden_Logs from "./pages/Garden_Logs/Garden_Logs";
 
 
 const queryClient = new QueryClient();
