@@ -18,9 +18,9 @@ import Notification from "./pages/notification/Notification";
 import Note from "./pages/note/Note";
 import Register from "./pages/register/Register";
 import Log from "./pages/log/Log";
-import Logs from "./pages/logs/Logs";
 import Actuator_Logs from "./pages/actuator_logs/Actuator_Logs";
 import Actuator_Log from "./pages/actuator_log/Actuator_Log";
+import Garden_Logs from "./pages/logs/Logs";
 
 
 const queryClient = new QueryClient();
@@ -76,7 +76,7 @@ function App() {
         },
         {
           path: "/log",
-          element: <Logs />,
+          element: <Garden_Logs />,
         },
         {
           path: "/log/:id",
