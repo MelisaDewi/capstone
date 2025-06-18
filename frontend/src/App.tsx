@@ -21,6 +21,7 @@ import Log from "./pages/log/Log";
 import Actuator_Logs from "./pages/actuator_logs/Actuator_Logs";
 import Actuator_Log from "./pages/actuator_log/Actuator_Log";
 import Garden_Logs from "./pages/Garden_Logs/Garden_Logs";
+import ProtectedRoute from "./ProtectedRoute";
 
 
 const queryClient = new QueryClient();
@@ -48,7 +49,11 @@ function App() {
   const router = createBrowserRouter([
     {
       path: "/",
-      element: <Layout />,
+      element: (
+      <ProtectedRoute>
+        <Layout />
+      </ProtectedRoute>
+    ),
       children: [
         {
           path: "/",
