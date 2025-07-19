@@ -336,11 +336,11 @@ mqttClient.on('message', (topic, messageBuffer) => {
         const value = payload.TDS ?? payload.value;
         sensorBuffer[user_id].TDS = value;
         checkThresholdAndNotify(user_id, 'TDS', value);
-      } else if (topic.includes('ultrasonik') || topic.includes('ultrasonic')) {
+      } else if (topic.includes('ultrasonik') || topic.includes('ultrasonic') || topic.includes('ULTRASONIC')) {
         const value = payload.water_level ?? payload.value;
         sensorBuffer[user_id].water_level = value;
         checkThresholdAndNotify(user_id, 'water_level', value);
-      } else if (topic.includes('humidity')) {
+      } else if (topic.includes('temperature') || topic.includes('DHT')) {
         const value = payload.temperature ?? payload.value;
         sensorBuffer[user_id].temperature = value;
         checkThresholdAndNotify(user_id, 'temperature', value);
