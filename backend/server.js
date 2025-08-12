@@ -7,6 +7,11 @@ const swaggerJsdoc = require('swagger-jsdoc');
 const swaggerUi = require('swagger-ui-express');
 
 const app = express();
+
+const http = require('http');
+const { WebSocketServer } = require('ws');
+const server = http.createServer(app);
+
 const port = 3000;
 require('dotenv').config();
 const bcrypt = require('bcrypt');
@@ -76,17 +81,26 @@ app.post("/login", (req, res) => {
     console.log("Stored hash:", user.password);
 
     const isMatch = await bcrypt.compare(password, user.password);
-
-    console.log("Match result:", isMatch); 
+    console.log("Match result:", isMatch);
 
     if (!isMatch) {
       return res.status(401).json({ error: "Invalid credentials" });
     }
 
-    const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: "1h" });
-    res.json({ success: true, token });
+    const token = jwt.sign(
+      { id: user.id, username: user.username },
+      JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+
+    res.json({
+      success: true,
+      token,
+      username: user.username // ✅ Include username in response
+    });
   });
 });
+
 
 
 const authenticate = (req, res, next) => {
@@ -102,6 +116,95 @@ const authenticate = (req, res, next) => {
   });
 };
 
+// --- WebSocket auth + registry ---
+const wss = new WebSocketServer({ server, path: '/ws' });
+
+// Map userId -> Set<WebSocket>
+const wsClients = new Map();
+
+function addClient(userId, ws) {
+  if (!wsClients.has(userId)) wsClients.set(userId, new Set());
+  wsClients.get(userId).add(ws);
+}
+function removeClient(userId, ws) {
+  const set = wsClients.get(userId);
+  if (!set) return;
+  set.delete(ws);
+  if (set.size === 0) wsClients.delete(userId);
+}
+function sendToUser(userId, payload) {
+  const set = wsClients.get(userId);
+  if (!set) return;
+  const data = JSON.stringify(payload);
+  for (const ws of set) {
+    if (ws.readyState === ws.OPEN && ws.bufferedAmount < 1_000_000) {
+      ws.send(data);
+    }
+  }
+}
+
+// Accept token via ?token= or Sec-WebSocket-Protocol header (subprotocol)
+wss.on('connection', (ws, req) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  let token = url.searchParams.get('token');
+
+  if (!token && req.headers['sec-websocket-protocol']) {
+    // e.g., client passes JWT as subprotocol
+    token = String(req.headers['sec-websocket-protocol']).split(',')[0].trim();
+    // echo selected subprotocol back
+    if (token) ws._protocol = token;
+  }
+
+  let user = null;
+  try { user = jwt.verify(token || '', JWT_SECRET); } catch {}
+  if (!user || !user.id) {
+    ws.close(4401, 'Unauthorized');
+    return;
+  }
+
+  ws.userId = user.id;
+  ws.isAlive = true;
+  addClient(ws.userId, ws);
+
+  ws.on('pong', () => { ws.isAlive = true; });
+
+  ws.on('message', (raw) => {
+    // optional: allow client to send commands later
+    // Example: {type:"ping"} or {type:"command", topic:"device/123/actuator", payload:{...}}
+    try {
+      const msg = JSON.parse(raw);
+      if (msg.type === 'ping') {
+        ws.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
+      }
+    } catch {}
+  });
+
+  ws.on('close', () => removeClient(ws.userId, ws));
+  ws.on('error', () => removeClient(ws.userId, ws));
+
+  // greet
+  ws.send(JSON.stringify({ type: 'hello', ts: Date.now() }));
+});
+
+// heartbeat
+setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (!ws.isAlive) return ws.terminate();
+    ws.isAlive = false;
+    try { ws.ping(); } catch {}
+  });
+}, 30000);
+
+// Periodically check buffers to flush expired (partial) snapshots
+setInterval(() => {
+  for (const userId of Object.keys(sensorBuffer)) {
+    tryInsertBufferedData(Number(userId)); // will flush if expired
+  }
+}, 2000); // every 2s is fine; adjust as you like
+
+
+
+const STALE_MS = 60000; 
 
 // MySQL Connection
 const db = mysql.createConnection({
@@ -182,29 +285,133 @@ const sensorBuffer = {}; // { [user_id]: { temperature, water_level, pH, TDS, la
 
 function tryInsertBufferedData(user_id) {
   const entry = sensorBuffer[user_id];
-  if (
-    entry &&
-    entry.temperature !== undefined &&
-    entry.water_level !== undefined &&
-    entry.pH !== undefined &&
-    entry.TDS !== undefined
-  ) {
-    const sql = `
+  if (!entry) return;
+
+  const now = Date.now();
+
+  const hasTemp = typeof entry.temperature === 'number';
+  const hasWL   = typeof entry.water_level === 'number';
+  const hasPH   = typeof entry.pH === 'number';
+  const hasTDS  = typeof entry.TDS === 'number';
+  const hasAll  = hasTemp && hasWL && hasPH && hasTDS;
+
+  const fresh =
+    hasAll &&
+    now - (entry.temperature_ts  || 0) <= STALE_MS &&
+    now - (entry.water_level_ts  || 0) <= STALE_MS &&
+    now - (entry.pH_ts           || 0) <= STALE_MS &&
+    now - (entry.TDS_ts          || 0) <= STALE_MS;
+
+  const expired = entry.first_ts && (now - entry.first_ts >= STALE_MS);
+
+  // Only flush when we have a full fresh set, OR we timed out.
+  if (!fresh && !expired) return;
+
+  if (expired) {
+  const missingSensors = [];
+  if (!hasTemp) missingSensors.push('temperature');
+  if (!hasWL)   missingSensors.push('water_level');
+  if (!hasPH)   missingSensors.push('pH');
+  if (!hasTDS)  missingSensors.push('TDS');
+
+  if (missingSensors.length > 0) {
+    const message = `No data from sensors: ${missingSensors.join(', ')} for over 1 minute.`;
+    const insertNotifSQL = `
+      INSERT INTO notifications (user_id, title, message)
+      VALUES (?, 'Sensor Failure', ?)
+    `;
+    db.query(insertNotifSQL, [user_id, message], (err, result) => {
+      if (!err) {
+        sendToUser(user_id, {
+          type: 'notification',
+          id: result?.insertId,
+          title: 'Sensor Failure',
+          message,
+          ts: Date.now()
+        });
+      }
+    });
+  }
+}
+
+
+  // Get 7-day averages to fill any missing values, so DB never sees NULL.
+  const avgSql = `
+    SELECT
+      AVG(temperature) AS avg_temp,
+      AVG(water_level) AS avg_water_level,
+      AVG(pH)          AS avg_ph,
+      AVG(TDS)         AS avg_tds
+    FROM garden_logs
+    WHERE user_id = ? AND created_at >= NOW() - INTERVAL 7 DAY
+  `;
+
+  db.query(avgSql, [user_id], (avgErr, rows) => {
+    if (avgErr) {
+      console.error('❌ Failed to compute averages:', avgErr);
+      // As a last resort, still insert using 0s to satisfy NOT NULL columns.
+      rows = [{}];
+    }
+    const a = rows?.[0] || {};
+
+    // NEW (allows null)
+    const t_ins  = hasTemp ? entry.temperature  : null;
+    const wl_ins = hasWL   ? entry.water_level  : null;
+    const ph_ins = hasPH   ? entry.pH           : null;
+    const tds_ins= hasTDS  ? entry.TDS          : null;
+
+    const insertSql = `
       INSERT INTO garden_logs (user_id, temperature, water_level, pH, TDS)
       VALUES (?, ?, ?, ?, ?)
     `;
-    db.query(sql, [user_id, entry.temperature, entry.water_level, entry.pH, entry.TDS], (err, result) => {
-      if (err) {
-        console.error('❌ Failed to insert sensor data into DB:', err);
-      } else {
-        console.log(`✅ Sensor data inserted into garden_logs for user ${user_id}`);
-        delete sensorBuffer[user_id]; 
+
+    db.query(insertSql, [user_id, t_ins, wl_ins, ph_ins, tds_ins], (insErr) => {
+      if (insErr) {
+        console.error('❌ Failed to insert sensor data into DB:', insErr);
+        return;
       }
+
+      console.log(`✅ ${expired ? 'Partial' : 'Full'} snapshot inserted for user ${user_id}`);
+
+      // Recompute averages AFTER insert so they reflect this row.
+      db.query(avgSql, [user_id], (postAvgErr, postRows) => {
+        const ap = postRows?.[0] || {};
+        // For UI: send null for missing latest (to display “N/A”), but we also
+        // included filled values in the DB so the 7d mean stays steady.
+        const missing = [];
+        if (!hasTemp) missing.push('temperature');
+        if (!hasWL)   missing.push('water_level');
+        if (!hasPH)   missing.push('pH');
+        if (!hasTDS)  missing.push('TDS');
+
+        sendToUser(user_id, {
+          type: 'garden_log_inserted',
+          data: {
+            temperature: hasTemp ? entry.temperature : null,
+            water_level: hasWL   ? entry.water_level : null,
+            pH:          hasPH   ? entry.pH          : null,
+            TDS:         hasTDS  ? entry.TDS         : null,
+          },
+          // (optional) what we actually wrote to DB
+          db_values: { temperature: t_ins, water_level: wl_ins, pH: ph_ins, TDS: tds_ins },
+          averages7d: {
+            temperature: Number(ap.avg_temp ?? 0),
+            water_level: Number(ap.avg_water_level ?? 0),
+            pH:          Number(ap.avg_ph ?? 0),
+            TDS:         Number(ap.avg_tds ?? 0),
+          },
+          complete: fresh,   // true => full set; false => partial (expired)
+          missing,
+          ts: now,
+        });
+
+        delete sensorBuffer[user_id];
+      });
     });
-  } else {
-    console.log(`🕓 Waiting for full sensor data for user ${user_id}...`, entry);
-  }
+  });
 }
+
+
 
 mqttClient.on('message', (topic, messageBuffer) => {
 
@@ -245,11 +452,18 @@ mqttClient.on('message', (topic, messageBuffer) => {
         VALUES (?, ?, ?)
       `;
 
-      db.query(insertNotifSQL, [user_id, title, message], (err) => {
-        if (err) {
-          console.error('❌ Failed to insert notification:', err);
-        } else {
-          console.log(`🔔 Notification saved: ${title} - ${message}`);
+      db.query(insertNotifSQL, [user_id, title, message], (err, result) => {
+      if (err) {
+        console.error('❌ Failed to insert notification:', err);
+      } else {
+        console.log(`🔔 Notification saved: ${title} - ${message}`);
+        sendToUser(user_id, {
+          type: 'notification',
+          id: result?.insertId,
+          title,
+          message,
+          ts: Date.now()
+        });
         }
       });
     }
@@ -298,6 +512,12 @@ mqttClient.on('message', (topic, messageBuffer) => {
             console.error('❌ Failed to insert actuator log:', err);
           } else {
             console.log(`📝 Actuator log inserted for user ${user_id}`);
+            sendToUser(user_id, {
+            type: 'actuator_log',
+            action,
+            status,
+            ts: Date.now()
+          });
           }
         });
       });
@@ -325,29 +545,35 @@ mqttClient.on('message', (topic, messageBuffer) => {
       const user_id = results[0].user_id;
 
       if (!sensorBuffer[user_id]) {
-        sensorBuffer[user_id] = { lastUpdate: Date.now() };
+        sensorBuffer[user_id] = { first_ts: Date.now() };
       }
+
 
       if (topic.includes('pH')) {
         const value = payload.pH ?? payload.value;
         sensorBuffer[user_id].pH = value;
+        sensorBuffer[user_id].pH_ts = Date.now();
         checkThresholdAndNotify(user_id, 'pH', value);
       } else if (topic.includes('TDS')) {
         const value = payload.TDS ?? payload.value;
         sensorBuffer[user_id].TDS = value;
+        sensorBuffer[user_id].TDS_ts = Date.now();
         checkThresholdAndNotify(user_id, 'TDS', value);
       } else if (topic.includes('ultrasonik') || topic.includes('ultrasonic') || topic.includes('ULTRASONIC')) {
         const value = payload.water_level ?? payload.value;
         sensorBuffer[user_id].water_level = value;
+        sensorBuffer[user_id].water_level_ts = Date.now();
         checkThresholdAndNotify(user_id, 'water_level', value);
       } else if (topic.includes('temperature') || topic.includes('DHT')) {
         const value = payload.temperature ?? payload.value;
         sensorBuffer[user_id].temperature = value;
+        sensorBuffer[user_id].temperature_ts = Date.now();
         checkThresholdAndNotify(user_id, 'temperature', value);
       }
 
       console.log(`📊 Buffered for user ${user_id}:`, sensorBuffer[user_id]);
       tryInsertBufferedData(user_id);
+
     });
   } catch (err) {
     console.error('❌ Error processing MQTT message:', err);
@@ -500,25 +726,32 @@ app.get('/sensor-summary', authenticate, (req, res) => {
       return res.status(404).json({ error: 'No data available' });
     }
 
+    // History now keeps nulls + timestamps so frontend can show gaps
     const history = results
-      .slice(0, 10)
-      .map(row => row[column])
+      .slice(0, 10) // keep the most recent 10, even if null
+      .map(row => ({
+        timestamp: row.created_at,
+        value: row[column] // may be null
+      }))
       .reverse();
 
-    const latest = results[0][column];
+    // Latest non-null reading
+    const latest = results[0]?.[column] ?? "N/A";
 
+
+    // 7-day average (skip nulls)
     const sevenDayAvg = (() => {
       const sevenDaysAgo = new Date();
       sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
       const valuesInLast7Days = results
-        .filter(row => new Date(row.created_at) >= sevenDaysAgo)
+        .filter(row => row[column] !== null && new Date(row.created_at) >= sevenDaysAgo)
         .map(row => row[column]);
 
+      if (valuesInLast7Days.length === 0) return null;
+
       const sum = valuesInLast7Days.reduce((acc, val) => acc + val, 0);
-      return valuesInLast7Days.length > 0
-        ? parseFloat((sum / valuesInLast7Days.length).toFixed(2))
-        : 0;
+      return parseFloat((sum / valuesInLast7Days.length).toFixed(2));
     })();
 
     res.json({
@@ -618,6 +851,7 @@ app.get("/garden_logs/:id", authenticate, (req, res) => {
     }
 
     res.json({ success: true, garden_log: results[0] });
+
   });
 });
 
@@ -653,6 +887,7 @@ app.get('/get-notifications', authenticate, (req, res) => {
 
     console.log("Notifications fetched from database:", results);
     res.json(results);  
+
   });
 });
 
@@ -768,7 +1003,15 @@ app.get('/check-environment', authenticate, (req, res) => {
           db.query(insertNotification, [userId, notification.title, notification.message], (err, result) => {
             if (err) {
               console.error('Error inserting notification:', err);
-            }
+            }  else {
+            sendToUser(userId, {
+              type: 'notification',
+              id: result?.insertId,
+              title: notification.title,
+              message: notification.message,
+              ts: Date.now()
+            });
+          }
           });
         });
       }
@@ -899,7 +1142,8 @@ app.get('/', (req, res) => {
   res.send('🌱 Hydroponics API running!');
 });
 
-app.listen(port, () => {
-  console.log(`🚀 Server ready at http://localhost:${port}`);
-  console.log(`📘 Swagger UI available at http://localhost:${port}/api-docs`);
+server.listen(port, () => {
+  console.log(`🚀 HTTP/WS server ready at http://localhost:${port}`);
+  console.log(`📘 Swagger UI at http://localhost:${port}/api-docs`);
 });
+
